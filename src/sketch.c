@@ -185,7 +185,17 @@ void mm_sketch_blend(void *km,
     uint64_t blendVal = 0, r_blendVal = 0;
     b176_t blndBuf[n_neighbors];
     int f_blendpos = 0;
-    
+
+    //Patrick
+    int c_size = 4; //#ones to be compared with
+    int chunks = blndK / c_size; // #chunks that will be inserted per kmer
+    int seq_arr[chunks]; //the array will store all bit_sequences
+    int bit_seq = (1 << c_size) - 1; //inital bit sequence
+    for(int i = 0;  i + 1 <= blndK / c_size; ++i){
+        seq_arr[i] = bit_seq;
+        bit_seq = bit_seq << c_size;
+    }
+
     //SIMD-related variables
     __m256i ma = _mm256_set1_epi8(1);
     __m256i mb = _mm256_set1_epi8(-1);
@@ -220,6 +230,14 @@ void mm_sketch_blend(void *km,
             
             kmer[0] = ((kmer[0] << 2 | c) & mask); // forward k-mer
             kmer[1] = ((kmer[1] >> 2) | (3ULL^c) << shift1); //reverse k-mer k-mer
+
+            //Patrick
+            for (int i = 0; i < 2; ++i){ // is there a more elegant way like: for(int c_val : kmer)
+                for(int j = 0; j < chunks; ++j){
+                    int hash_val = kmer[i] & seq_arr[j]; //hash_val is ready to be inserted
+                    //insert hash_val into the map
+                }
+            }
 
             ++l;
             if (l >= k && kmer_span < 256){
