@@ -316,6 +316,12 @@ typedef struct {
 	mm128_v a;
 } step_t;
 
+typedef struct {
+    int n_seq;
+    mm_bseq1_t *seq;
+    mm64_v a;
+} nstep_t;
+
 static void mm_idx_add(mm_idx_t *mi, int n, const mm128_t *a)
 {
 	int i, mask = (1<<mi->b) - 1;
@@ -324,6 +330,17 @@ static void mm_idx_add(mm_idx_t *mi, int n, const mm128_t *a)
 		kv_push(mm128_t, 0, *p, a[i]);
 	}
 }
+
+static void nmm_idx_add(mm_idx_t *mi, int n, const mm128_t *a)
+{
+    int i, mask = (1<<mi->b) - 1;
+    for (i = 0; i < n; ++i) {
+        mm64_v *p = &mi->B[a[i].x>>14&mask].a; //a is the (minimizer (x), position array (y))
+        kv_push(uint64_t, 0, *p, a[i]);
+    }
+}
+
+
 
 static void *worker_pipeline(void *shared, int step, void *in)
 {
@@ -356,7 +373,7 @@ static void *worker_pipeline(void *shared, int step, void *in)
 					p->mi->S = (uint32_t*)realloc(p->mi->S, max_len * 4);
 					memset(&p->mi->S[old_max_len], 0, 4 * (max_len - old_max_len));
 				}
-			}
+            }
 			// populate p->mi->seq
 			for (i = 0; i < s->n_seq; ++i) {
 				mm_idx_seq_t *seq = &p->mi->seq[p->mi->n_seq];
@@ -385,12 +402,13 @@ static void *worker_pipeline(void *shared, int step, void *in)
     } else if (step == 1) { // step 1: compute sketch
     	// printf("%s5\n", __func__);
         step_t *s = (step_t*)in;
+        nstep_t *ns = (nstep_t*)in; //pat
 		for (i = 0; i < s->n_seq; ++i) {
 			mm_bseq1_t *t = &s->seq[i];
 			if (t->l_seq > 0){
 				// printf("%s6 %d %d %s %s\n", __func__, t->l_seq, t->rid, t->name, t->seq);
 				//check "mm_bseq1_t" in bseq.h for the meanings of l_seq etc...
-				mm_sketch(0, t->seq, t->l_seq, p->mi->w, p->mi->blend_bits, p->mi->k, p->mi->k_shift, p->mi->n_neighbors, t->rid, p->mi->flag&MM_I_HPC, p->mi->flag&B_I_SKEWED, p->mi->flag&B_I_STROBEMERS, &s->a);
+				mm_sketch(0, t->seq, t->l_seq, p->mi->w, p->mi->blend_bits, p->mi->k, p->mi->k_shift, p->mi->n_neighbors, t->rid, p->mi->flag&MM_I_HPC, p->mi->flag&B_I_SKEWED, p->mi->flag&B_I_STROBEMERS, &s->a, &ns->a);
 			}
 			else if (mm_verbose >= 2)
 				fprintf(stderr, "[WARNING] the length database sequence '%s' is 0\n", t->name);
@@ -443,7 +461,9 @@ mm_idx_t *mm_idx_str(int w, int blend_bits, int k, int k_shift, int n_neighbors,
 {
 	uint64_t sum_len = 0;
 	mm128_v a = {0,0,0};
+    mm64_v na = {0,0,0};
 	mm_idx_t *mi;
+    mm_idx_t *nmi;
 	khash_t(str) *h;
 	int i, flag = 0;
 
@@ -480,11 +500,14 @@ mm_idx_t *mm_idx_str(int w, int blend_bits, int k, int k_shift, int n_neighbors,
 		sum_len += p->len;
 		if (p->len > 0){
 			a.n = 0;
-			mm_sketch(0, s, p->len, w, blend_bits, k, k_shift, n_neighbors, i, is_hpc, is_skewed, is_strobs, &a);
+            na.n = 0; //pat
+			mm_sketch(0, s, p->len, w, blend_bits, k, k_shift, n_neighbors, i, is_hpc, is_skewed, is_strobs, &a, &na);
 			mm_idx_add(mi, a.n, a.a);
+            nmm_idx_add(nmi, na.n, na.a); //what to do with mi?
 		}
 	}
 	free(a.a);
+    free(na.a);
 	mm_idx_post(mi, 1);
 	return mi;
 }
