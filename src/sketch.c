@@ -123,6 +123,15 @@ static inline uint64_t calc_blend_rm_simd(__m256i* blndcnt_lsb, __m256i* blndcnt
     return blendVal;
 }
 
+static inline uint64_t insertVal(void *km, mm128_v *p,mm64_v *np, mm128_t* min, uint64_t* seq_arr, int chunks){
+    kv_push(mm128_t, km, *p, *min);
+    for(int j = 0; j < chunks; ++j){
+        uint64_t hash_v = ((*min).x >> 14) & (*(seq_arr + j));//[j]; //hash_val is ready to be inserted
+        kv_push(uint64_t, km, *np, hash_v);
+    }
+}
+
+
 // static inline void calc_blend(mm128_t* addMin, mm128_t* remMin, mm128_t* min, __m256i* blndcnt_lsb, __m256i* blndcnt_msb, __m256i* ma, __m256i* mb, uint64_t val, uint64_t remval, const uint64_t iMask, const uint64_t sMask, const uint64_t blndMask, const int bits){
 
 //     addMin.x = min[j].x;
@@ -169,7 +178,8 @@ void mm_sketch_blend(void *km,
                      int n_neighbors,
                      uint32_t rid,
                      int is_hpc,
-                     mm128_v *p){
+                     mm128_v *p,
+                     mm64_v *np){
     
     assert(len > 0 && (w > 0 && w+k < 8192) && (k > 0 && k <= 28) && (n_neighbors > 0 && n_neighbors+k < 8192) && (blend_bits <= 56)); // 56 bits for k-mer; could use long k-mers, but 28 enough in practice
     
@@ -189,9 +199,9 @@ void mm_sketch_blend(void *km,
     //Patrick
     int c_size = 4; //#ones to be compared with
     int chunks = blndK / c_size; // #chunks that will be inserted per kmer
-    int seq_arr[chunks]; //the array will store all bit_sequences
-    int bit_seq = (1 << c_size) - 1; //inital bit sequence
-    for(int i = 0;  i + 1 <= blndK / c_size; ++i){
+    uint64_t seq_arr[chunks]; //the array will store all bit_sequences
+    uint64_t bit_seq = (1 << c_size) - 1; //inital bit sequence
+    for(int i = 0;  i < chunks; ++i){
         seq_arr[i] = bit_seq;
         bit_seq = bit_seq << c_size;
     }
@@ -231,13 +241,7 @@ void mm_sketch_blend(void *km,
             kmer[0] = ((kmer[0] << 2 | c) & mask); // forward k-mer
             kmer[1] = ((kmer[1] >> 2) | (3ULL^c) << shift1); //reverse k-mer k-mer
 
-            //Patrick
-            for (int i = 0; i < 2; ++i){ // is there a more elegant way like: for(int c_val : kmer)
-                for(int j = 0; j < chunks; ++j){
-                    int hash_val = kmer[i] & seq_arr[j]; //hash_val is ready to be inserted
-                    //insert hash_val into the map
-                }
-            }
+
 
             ++l;
             if (l >= k && kmer_span < 256){
@@ -249,6 +253,15 @@ void mm_sketch_blend(void *km,
                 blndBuf[f_blendpos].y = hkmer[1];
                 blndBuf[f_blendpos].k = kmer_span;
                 blndBuf[f_blendpos].i = i;
+
+                //Patrick
+                for(int j = 0; j < chunks; ++j){
+                    uint64_t hash_for = hkmer[0] & seq_arr[j]; //hash_val is ready to be inserted
+                    uint64_t hash_rev = hkmer[1] & seq_arr[j]; //hash_val is ready to be inserted
+                    //insert both hash_val into the map
+                    kv_push(uint64_t, km, *np, hash_for);
+                    kv_push(uint64_t, km, *np, hash_rev);
+                }
 
                 if(++f_blendpos == n_neighbors) f_blendpos = 0;
 
@@ -927,11 +940,13 @@ void mm_sketch(void *km,
                int is_hpc,
                int is_skewed,
                int is_strobs,
-               mm128_v *p){
+               mm128_v *p,
+               mm64_v *np){
     
     if(is_skewed > 0)
         mm_sketch_sk_blend(km, str, len, w, blend_bits, k, n_neighbors, rid, is_hpc, p);
     else if(is_strobs)
         mm_sketch_sb_blend(km, str, len, w, blend_bits, k, n_neighbors, rid, is_hpc, p);
-    else mm_sketch_blend(km, str, len, w, blend_bits, k, n_neighbors, rid, is_hpc, p);
+    else mm_sketch_blend(km, str, len, w, blend_bits, k, n_neighbors, rid, is_hpc, p, np);
+    return;
 }
