@@ -26,9 +26,13 @@ KHASH_MAP_INIT_STR(str, uint32_t)
 
 typedef struct mm_idx_bucket_s {
 	mm128_v a;   // (minimizer, position) array
+    mm128_v b;   // fomer mm64_v
 	int32_t n;   // size of the _p_ array
+    int32_t cn;
 	uint64_t *p; // position array for minimizers appearing >1 times
+    uint64_t *cp;
 	void *h;     // hash table indexing _p_ and minimizers appearing once
+    void *ch;
 } mm_idx_bucket_t;
 
 typedef struct {
@@ -227,19 +231,21 @@ int32_t mm_idx_cal_max_occ(const mm_idx_t *mi, float f)
 static void worker_post(void *g, long i, int tid)
 {
 	int n, n_keys;
+    int cn, cn_keys;
 	size_t j, start_a, start_p;
 	idxhash_t *h;
+    idxhash_t *ch;
 	mm_idx_t *mi = (mm_idx_t*)g;
 	mm_idx_bucket_t *b = &mi->B[i];
 	if (b->a.n == 0) return;
 
 	// sort by minimizer
 	radix_sort_128x(b->a.a, b->a.a + b->a.n);
-
+    radix_sort_128x(b->b.a, b->b.a + b->b.n);
 	// printf("%s1\n", __func__);
 
 	// count and preallocate
-	for (j = 1, n = 1, n_keys = 0, b->n = 0; j <= b->a.n; ++j) {
+	for (j = 1, n = 1, n_keys = 0, b->n = 0; j <= b->a.n; ++j) { //twice the same?
 		if (j == b->a.n || b->a.a[j].x>>14 != b->a.a[j-1].x>>14) {
 			// printf(":%lu:", b->a.a[j].x);
 			++n_keys;
@@ -247,6 +253,16 @@ static void worker_post(void *g, long i, int tid)
 			n = 1;
 		} else ++n;
 	}
+
+    // count and preallocate
+    for (j = 1, n = 1, n_keys = 0, b->n = 0; j <= b->a.n; ++j) {
+        if (j == b->a.n || b->a.a[j].x>>14 != b->a.a[j-1].x>>14) {
+            // printf(":%lu:", b->a.a[j].x);
+            ++n_keys;
+            if (n > 1) b->n += n;
+            n = 1;
+        } else ++n;
+    }
 	// printf("\n");
 	h = kh_init(idx);
 	kh_resize(idx, h, n_keys);
@@ -283,11 +299,58 @@ static void worker_post(void *g, long i, int tid)
 		} else ++n;
 	}
 	b->h = h;
-	assert(b->n == (int32_t)start_p);
+    assert(b->n == (int32_t)start_p);
 
-	// deallocate and clear b->a
-	kfree(0, b->a.a);
-	b->a.n = b->a.m = 0, b->a.a = 0;
+    // deallocate and clear b->a
+    kfree(0, b->a.a);
+    b->a.n = b->a.m = 0, b->a.a = 0;
+
+    // count and preallocate
+    for (j = 1, cn = 1, cn_keys = 0, b->cn = 0; j <= b->b.cn; ++j) {
+        if (j == b->b.n || b->b.a[j].x != b->b.a[j-1].x) {
+            // printf(":%lu:", b->a.a[j].x);
+            ++n_keys;
+            if (cn > 1) b->cn += cn;
+            cn = 1;
+        } else ++cn;
+    }
+    ch = kh_init(idx);
+    kh_resize(idx, ch, n_keys);
+    b->cp = (uint64_t*)calloc(b->cn, 8);
+
+    // create the hash table
+    for (j = 1, cn = 1, start_a = start_p = 0; j <= b->b.cn; ++j) {
+        if (j == b->b.cn || b->b.a[j].x != b->b.a[j-1].x) {
+            khint_t itr;
+            int absent;
+            mm128_t p = b->b.a[j-1].x;
+            //shift p->x 14, then shift mi->b more, then 1 shift left
+            itr = kh_put(idx, ch, p.x, &absent);
+
+            // static char cpyC[65];
+            // cpyC[0] = '\0';
+            // for (uint64_t val = 1UL << (sizeof(uint64_t)*8-1); val > 0; val >>= 1)
+            // 	strcat(cpyC, ((p->x & val) == val) ? "1" : "0");
+            // printf("%s %lu %d %s\n", __func__, p->x>>14>>mi->b<<1, 14>>mi->b<<1, cpyC);
+
+            assert(absent && j == start_a + cn);
+            if (cn == 1) {
+                kh_key(ch, itr) |= 1;
+                kh_val(ch, itr) = p->y;
+            } else {
+                int k;
+                for (k = 0; k < cn; ++k)
+                    b->cp[start_p + k] = b->b.a[start_a + k].y;
+                radix_sort_64(&b->cp[start_p], &b->cp[start_p + cn]); // sort by position; needed as in-place radix_sort_128x() is not stable
+                kh_val(ch, itr) = (uint64_t)start_p<<32 | cn;
+                start_p += cn;
+            }
+            start_a = j, cn = 1;
+        } else ++cn;
+    }
+    b->ch = ch;
+    assert(b->cn == (int32_t)start_p);
+
 }
  
 static void mm_idx_post(mm_idx_t *mi, int n_threads)
@@ -314,28 +377,30 @@ typedef struct {
     int n_seq;
 	mm_bseq1_t *seq;
 	mm128_v a;
+    mm128_v b; //former mm64_v
 } step_t;
-
+/*
 typedef struct {
     int n_seq;
     mm_bseq1_t *seq;
     mm64_v a;
 } nstep_t;
-
+*/
 static void mm_idx_add(mm_idx_t *mi, int n, const mm128_t *a)
 {
 	int i, mask = (1<<mi->b) - 1;
 	for (i = 0; i < n; ++i) {
 		mm128_v *p = &mi->B[a[i].x>>14&mask].a; //a is the (minimizer (x), position array (y))
 		kv_push(mm128_t, 0, *p, a[i]);
+
 	}
 }
 
-static void nmm_idx_add(mm_idx_t *mi, int n, const mm128_t *a)
+static void nmm_idx_add(mm_idx_t *mi, int n, const mm64_t *a)
 {
     int i, mask = (1<<mi->b) - 1;
     for (i = 0; i < n; ++i) {
-        mm64_v *p = &mi->B[a[i].x>>14&mask].a; //a is the (minimizer (x), position array (y))
+        mm128_v *p = &mi->B[a[i].x>>14&mask].a; //former mm64_v //a is the (minimizer (x), position array (y))
         kv_push(uint64_t, 0, *p, a[i]);
     }
 }
@@ -402,13 +467,13 @@ static void *worker_pipeline(void *shared, int step, void *in)
     } else if (step == 1) { // step 1: compute sketch
     	// printf("%s5\n", __func__);
         step_t *s = (step_t*)in;
-        nstep_t *ns = (nstep_t*)in; //pat
+        //step_t *ns = (step_t*)in; //pat
 		for (i = 0; i < s->n_seq; ++i) {
 			mm_bseq1_t *t = &s->seq[i];
 			if (t->l_seq > 0){
 				// printf("%s6 %d %d %s %s\n", __func__, t->l_seq, t->rid, t->name, t->seq);
 				//check "mm_bseq1_t" in bseq.h for the meanings of l_seq etc...
-				mm_sketch(0, t->seq, t->l_seq, p->mi->w, p->mi->blend_bits, p->mi->k, p->mi->k_shift, p->mi->n_neighbors, t->rid, p->mi->flag&MM_I_HPC, p->mi->flag&B_I_SKEWED, p->mi->flag&B_I_STROBEMERS, &s->a, &ns->a);
+				mm_sketch(0, t->seq, t->l_seq, p->mi->w, p->mi->blend_bits, p->mi->k, p->mi->k_shift, p->mi->n_neighbors, t->rid, p->mi->flag&MM_I_HPC, p->mi->flag&B_I_SKEWED, p->mi->flag&B_I_STROBEMERS, &s->a, &s->b);
 			}
 			else if (mm_verbose >= 2)
 				fprintf(stderr, "[WARNING] the length database sequence '%s' is 0\n", t->name);
@@ -421,6 +486,7 @@ static void *worker_pipeline(void *shared, int step, void *in)
         step_t *s = (step_t*)in;
         //add n seeds (a.n) from a target sequence (located in a.a) to the index
 		mm_idx_add(p->mi, s->a.n, s->a.a);
+        mm_idx_add(p->mi, s->b.n, s->b.a);
 		kfree(0, s->a.a); free(s);
 	}
     return 0;
@@ -461,7 +527,7 @@ mm_idx_t *mm_idx_str(int w, int blend_bits, int k, int k_shift, int n_neighbors,
 {
 	uint64_t sum_len = 0;
 	mm128_v a = {0,0,0};
-    mm64_v na = {0,0,0};
+    mm128_v _v na = {0,0,0};//fomerm mm64_v
 	mm_idx_t *mi;
     mm_idx_t *nmi;
 	khash_t(str) *h;
@@ -515,12 +581,12 @@ mm_idx_t *mm_idx_str(int w, int blend_bits, int k, int k_shift, int n_neighbors,
 /*************
  * index I/O *
  *************/
-void mm_idx_dump(FILE *fp, const mm_idx_t *mi)
+void mm_id§x_dump(FILE *fp, const mm_idx_t *mi)
 {
 	uint64_t sum_len = 0;
 	uint32_t x[8], i;
 
-	x[0] = mi->w, x[1] = mi->k, x[2] = mi->b, x[3] = mi->n_seq, x[4] = mi->flag, x[5] = mi->blend_bits, x[6] = mi->k_shift, x[7] = mi->n_neighbors;
+	x[0] = mi->w, x[1] = mi->k, x[2] = mi->b, x[3] = mi->n_seq, x[4] = mi->flag, x[5] = mi->blend_bits, x[6] = mi->k_shift, x[7] = mi->n_neighbors,;
 	fwrite(MM_IDX_MAGIC, 1, 4, fp);
 	fwrite(x, 4, 8, fp);
 	for (i = 0; i < mi->n_seq; ++i) {
@@ -551,6 +617,7 @@ void mm_idx_dump(FILE *fp, const mm_idx_t *mi)
 			fwrite(x, 8, 2, fp);
 		}
 	}
+
 	if (!(mi->flag & MM_I_NO_SEQ))
 		fwrite(mi->S, 4, (sum_len + 7) / 8, fp);
 	fflush(fp);
@@ -605,7 +672,7 @@ mm_idx_t *mm_idx_load(FILE *fp)
 			kh_val(h, k) = x[1];
 		}
 	}
-	if (!(mi->flag & MM_I_NO_SEQ)) {
+        if (!(mi->flag & MM_I_NO_SEQ)) {
 		mi->S = (uint32_t*)malloc((sum_len + 7) / 8 * 4);
 		fread(mi->S, 4, (sum_len + 7) / 8, fp);
 	}
