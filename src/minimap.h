@@ -72,7 +72,7 @@ extern "C" {
 // m is the allocated items in the memory. when n reaches m, m is increased.
 typedef struct { uint64_t x, y; } mm128_t;
 typedef struct { size_t n, m; mm128_t *a; } mm128_v;
-
+//typedef struct { size_t n, m; mm128_t *a; } mm64_v;
 // minimap2 index
 typedef struct {
 	char *name;      // name of the db sequence

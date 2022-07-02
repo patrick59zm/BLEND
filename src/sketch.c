@@ -122,7 +122,7 @@ static inline uint64_t calc_blend_rm_simd(__m256i* blndcnt_lsb, __m256i* blndcnt
     
     return blendVal;
 }
-
+/*
 static inline uint64_t insertVal(void *km, mm128_v *p,mm128_v *np, mm128_t* min, uint64_t* seq_arr, int chunks){
     kv_push(mm128_t, km, *p, *min);
     for(int j = 0; j < chunks; ++j){
@@ -131,7 +131,7 @@ static inline uint64_t insertVal(void *km, mm128_v *p,mm128_v *np, mm128_t* min,
     }
 }
 
-
+*/
 // static inline void calc_blend(mm128_t* addMin, mm128_t* remMin, mm128_t* min, __m256i* blndcnt_lsb, __m256i* blndcnt_msb, __m256i* ma, __m256i* mb, uint64_t val, uint64_t remval, const uint64_t iMask, const uint64_t sMask, const uint64_t blndMask, const int bits){
 
 //     addMin.x = min[j].x;
@@ -149,23 +149,21 @@ static inline uint64_t insertVal(void *km, mm128_v *p,mm128_v *np, mm128_t* min,
 //     }else //only addition of min[j]
 //         calc_blend_simd(&blndcnt_lsb, &blndcnt_msb, &ma, &mb, min[j].x>>14, blndMask, bits);
 // }
-/*
-static inline calc_chunk(void *km, mm128_v *np, uint64_t* hkmer){
+
+static inline calc_chunk(void *km, mm128_v *np, uint64_t hval, mm128_t cbuf, int chunks, uint64_t* seq_arr){ //unsure about mm128_t
 
     //Patrick
     for(int j = 0; j < chunks; ++j){
-        uint64_t hash_for = hkmer[0] & seq_arr[j]; //hash_val is ready to be inserted
-        uint64_t hash_rev = hkmer[1] & seq_arr[j]; //hash_val is ready to be inserted
+        uint64_t hash_for = hval & seq_arr[j]; //hash_val is ready to be inserted
 
         cbuf.x = hash_for;
-        cbuf.y = hkmer[0];
+        cbuf.y = hval;
 
         //insert both hash_val into the map
-        kv_push(uint64_t, km, *np, hash_for);
-        kv_push(uint64_t, km, *np, hash_rev);
+        kv_push(uint64_t, km, *np, cbuf); //mm128_t? since we are pushing cbuf
     }
 }
-*/
+
 /**
  * Find symmetric (w,k)-minimizers on a DNA sequence and BLEND it with its (n_neighbors-1) preceding neighbor k-mers
  *
@@ -196,7 +194,7 @@ void mm_sketch_blend(void *km,
                      int is_hpc,
                      mm128_v *p,
                      mm128_v *np){
-    
+
     assert(len > 0 && (w > 0 && w+k < 8192) && (k > 0 && k <= 28) && (n_neighbors > 0 && n_neighbors+k < 8192) && (blend_bits <= 56)); // 56 bits for k-mer; could use long k-mers, but 28 enough in practice
     
     const int blndK = (blend_bits>0)?blend_bits:2*k;
@@ -272,8 +270,8 @@ void mm_sketch_blend(void *km,
                 blndBuf[f_blendpos].i = i;
 
                 //Patrick
-                for(int j = 0; j < chunks; ++j){
-                    uint64_t hash_for = hkmer[0] & seq_arr[j]; //hash_val is ready to be inserted
+             /*   for(int j = 0; j < chunks; ++j){
+                    uint64_t hash_for = hkmer[0] & seq_arr[j]; //hash_val is ready to be inserted buf[j].x>>14 instead of hkmer[0]
                     uint64_t hash_rev = hkmer[1] & seq_arr[j]; //hash_val is ready to be inserted
 
                     cbuf.x = hash_for;
@@ -286,7 +284,7 @@ void mm_sketch_blend(void *km,
                     cbuf.y = hkmer[1];
 
                     kv_push(uint64_t, km, *np, cbuf);
-                }
+                }*/
 
                 if(++f_blendpos == n_neighbors) f_blendpos = 0;
 
@@ -320,24 +318,24 @@ void mm_sketch_blend(void *km,
         
         if (l == w + k - 1 && min.x != UINT64_MAX) { // special case for the first window - because identical k-mers are not stored yet
             for (j = buf_pos + 1; j < w; ++j)
-                if (min.x == buf[j].x && buf[j].y != min.y) kv_push(mm128_t, km, *p, buf[j]);
+                if (min.x == buf[j].x && buf[j].y != min.y) {kv_push(mm128_t, km, *p, buf[j]); calc_chunk(km, np, buf[j].x>>14, cbuf, chunks, &seq_arr);}//buf[j].x>>14 <- hashvalue
             for (j = 0; j < buf_pos; ++j)
-                if (min.x == buf[j].x && buf[j].y != min.y) kv_push(mm128_t, km, *p, buf[j]);
+                if (min.x == buf[j].x && buf[j].y != min.y) {kv_push(mm128_t, km, *p, buf[j]); calc_chunk(km, np, buf[j].x>>14, cbuf, chunks, &seq_arr);}
         }
         if (info.x <= min.x) { // a new minimum; then write the old min
-            if (l >= w + k && min.x != UINT64_MAX) kv_push(mm128_t, km, *p, min);
+            if (l >= w + k && min.x != UINT64_MAX) {kv_push(mm128_t, km, *p, min); calc_chunk(km, np, min.x>>14, cbuf, chunks, &seq_arr);}//min.x>>14
             min = info, min_pos = buf_pos;
         } else if (buf_pos == min_pos) { // old min has moved outside the window
-            if (l >= w + k - 1 && min.x != UINT64_MAX) kv_push(mm128_t, km, *p, min);
+            if (l >= w + k - 1 && min.x != UINT64_MAX) {kv_push(mm128_t, km, *p, min); calc_chunk(km, np, min.x>>14, cbuf, chunks, &seq_arr);}
             for (j = buf_pos + 1, min.x = UINT64_MAX; j < w; ++j) // the two loops are necessary when there are identical k-mers
                 if (min.x >= buf[j].x) min = buf[j], min_pos = j; // >= is important s.t. min is always the closest k-mer
             for (j = 0; j <= buf_pos; ++j)
                 if (min.x >= buf[j].x) min = buf[j], min_pos = j;
             if (l >= w + k - 1 && min.x != UINT64_MAX) { // write identical k-mers
                 for (j = buf_pos + 1; j < w; ++j) // these two loops make sure the output is sorted
-                    if (min.x == buf[j].x && min.y != buf[j].y) kv_push(mm128_t, km, *p, buf[j]);
+                    if (min.x == buf[j].x && min.y != buf[j].y) {kv_push(mm128_t, km, *p, buf[j]); calc_chunk(km, np, buf[j].x>>14, cbuf, chunks, &seq_arr);}
                 for (j = 0; j <= buf_pos; ++j)
-                    if (min.x == buf[j].x && min.y != buf[j].y) kv_push(mm128_t, km, *p, buf[j]);
+                    if (min.x == buf[j].x && min.y != buf[j].y) {kv_push(mm128_t, km, *p, buf[j]); calc_chunk(km, np, buf[j].x>>14, cbuf, chunks, &seq_arr);}
             }
         }
 

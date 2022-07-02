@@ -6,6 +6,7 @@
 #include "bseq.h"
 #include "kvec.h"
 #include "kseq.h"
+
 KSEQ_INIT2(, gzFile, gzread)
 
 unsigned char seq_comp_table[256] = {

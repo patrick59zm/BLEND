@@ -244,15 +244,7 @@ static void worker_post(void *g, long i, int tid)
     radix_sort_128x(b->b.a, b->b.a + b->b.n);
 	// printf("%s1\n", __func__);
 
-	// count and preallocate
-	for (j = 1, n = 1, n_keys = 0, b->n = 0; j <= b->a.n; ++j) { //twice the same?
-		if (j == b->a.n || b->a.a[j].x>>14 != b->a.a[j-1].x>>14) {
-			// printf(":%lu:", b->a.a[j].x);
-			++n_keys;
-			if (n > 1) b->n += n;
-			n = 1;
-		} else ++n;
-	}
+
 
     // count and preallocate
     for (j = 1, n = 1, n_keys = 0, b->n = 0; j <= b->a.n; ++j) {
@@ -306,7 +298,7 @@ static void worker_post(void *g, long i, int tid)
     b->a.n = b->a.m = 0, b->a.a = 0;
 
     // count and preallocate
-    for (j = 1, cn = 1, cn_keys = 0, b->cn = 0; j <= b->b.cn; ++j) {
+    for (j = 1, cn = 1, cn_keys = 0, b->cn = 0; j <= b->b.n; ++j) {
         if (j == b->b.n || b->b.a[j].x != b->b.a[j-1].x) {
             // printf(":%lu:", b->a.a[j].x);
             ++n_keys;
@@ -319,13 +311,13 @@ static void worker_post(void *g, long i, int tid)
     b->cp = (uint64_t*)calloc(b->cn, 8);
 
     // create the hash table
-    for (j = 1, cn = 1, start_a = start_p = 0; j <= b->b.cn; ++j) {
-        if (j == b->b.cn || b->b.a[j].x != b->b.a[j-1].x) {
+    for (j = 1, cn = 1, start_a = start_p = 0; j <= b->b.n; ++j) {
+        if (j == b->b.n || b->b.a[j].x != b->b.a[j-1].x) {
             khint_t itr;
             int absent;
-            mm128_t p = b->b.a[j-1].x;
+            mm128_t *p = &b->b.a[j-1];
             //shift p->x 14, then shift mi->b more, then 1 shift left
-            itr = kh_put(idx, ch, p.x, &absent);
+            itr = kh_put(idx, ch, p->x, &absent);
 
             // static char cpyC[65];
             // cpyC[0] = '\0';
@@ -396,12 +388,12 @@ static void mm_idx_add(mm_idx_t *mi, int n, const mm128_t *a)
 	}
 }
 
-static void nmm_idx_add(mm_idx_t *mi, int n, const mm64_t *a)
+static void nmm_idx_add(mm_idx_t *mi, int n, const mm128_t *a)
 {
     int i, mask = (1<<mi->b) - 1;
     for (i = 0; i < n; ++i) {
-        mm128_v *p = &mi->B[a[i].x>>14&mask].a; //former mm64_v //a is the (minimizer (x), position array (y))
-        kv_push(uint64_t, 0, *p, a[i]);
+        mm128_v *p = &mi->B[a[i].x&mask].b; //former mm64_v //a is the (minimizer (x), position array (y))
+        kv_push(mm128_t, 0, *p, a[i]);
     }
 }
 
@@ -486,7 +478,7 @@ static void *worker_pipeline(void *shared, int step, void *in)
         step_t *s = (step_t*)in;
         //add n seeds (a.n) from a target sequence (located in a.a) to the index
 		mm_idx_add(p->mi, s->a.n, s->a.a);
-        mm_idx_add(p->mi, s->b.n, s->b.a);
+        nmm_idx_add(p->mi, s->b.n, s->b.a);
 		kfree(0, s->a.a); free(s);
 	}
     return 0;
@@ -527,7 +519,7 @@ mm_idx_t *mm_idx_str(int w, int blend_bits, int k, int k_shift, int n_neighbors,
 {
 	uint64_t sum_len = 0;
 	mm128_v a = {0,0,0};
-    mm128_v _v na = {0,0,0};//fomerm mm64_v
+    mm128_v na = {0,0,0};//fomerm mm64_v
 	mm_idx_t *mi;
     mm_idx_t *nmi;
 	khash_t(str) *h;
@@ -581,12 +573,12 @@ mm_idx_t *mm_idx_str(int w, int blend_bits, int k, int k_shift, int n_neighbors,
 /*************
  * index I/O *
  *************/
-void mm_id§x_dump(FILE *fp, const mm_idx_t *mi)
+void mm_idx_dump(FILE *fp, const mm_idx_t *mi)
 {
 	uint64_t sum_len = 0;
 	uint32_t x[8], i;
 
-	x[0] = mi->w, x[1] = mi->k, x[2] = mi->b, x[3] = mi->n_seq, x[4] = mi->flag, x[5] = mi->blend_bits, x[6] = mi->k_shift, x[7] = mi->n_neighbors,;
+	x[0] = mi->w, x[1] = mi->k, x[2] = mi->b, x[3] = mi->n_seq, x[4] = mi->flag, x[5] = mi->blend_bits, x[6] = mi->k_shift, x[7] = mi->n_neighbors;
 	fwrite(MM_IDX_MAGIC, 1, 4, fp);
 	fwrite(x, 4, 8, fp);
 	for (i = 0; i < mi->n_seq; ++i) {
@@ -605,17 +597,29 @@ void mm_id§x_dump(FILE *fp, const mm_idx_t *mi)
 		mm_idx_bucket_t *b = &mi->B[i];
 		khint_t k;
 		idxhash_t *h = (idxhash_t*)b->h;
+        idxhash_t *ch = (idxhash_t*)b->ch;
 		uint32_t size = h? h->size : 0;
-		fwrite(&b->n, 4, 1, fp);
+        uint32_t csize = ch? ch->size : 0;
+        fwrite(&b->n, 4, 1, fp);
+        fwrite(&b->cn, 4, 1, fp);
 		fwrite(b->p, 8, b->n, fp);
+        fwrite(b->cp, 8, b->cn, fp);
 		fwrite(&size, 4, 1, fp);
+        fwrite(&csize, 4, 1, fp);
 		if (size == 0) continue;
+        if (csize == 0) continue;
 		for (k = 0; k < kh_end(h); ++k) {
 			uint64_t x[2];
 			if (!kh_exist(h, k)) continue;
 			x[0] = kh_key(h, k), x[1] = kh_val(h, k);
 			fwrite(x, 8, 2, fp);
 		}
+        for (k = 0; k < kh_end(ch); ++k) {
+            uint64_t x[2];
+            if (!kh_exist(ch, k)) continue;
+            x[0] = kh_key(ch, k), x[1] = kh_val(ch, k);
+            fwrite(x, 8, 2, fp);
+        }
 	}
 
 	if (!(mi->flag & MM_I_NO_SEQ))
@@ -652,16 +656,24 @@ mm_idx_t *mm_idx_load(FILE *fp)
 	}
 	for (i = 0; i < 1<<mi->b; ++i) {
 		mm_idx_bucket_t *b = &mi->B[i];
-		uint32_t j, size;
+		uint32_t j, size, csize;
 		khint_t k;
 		idxhash_t *h;
+        idxhash_t *ch;
 		fread(&b->n, 4, 1, fp);
+        fread(&b->cn, 4, 1, fp);
 		b->p = (uint64_t*)malloc(b->n * 8);
+        b->cp = (uint64_t*)malloc(b->cn * 8);
 		fread(b->p, 8, b->n, fp);
+        fread(b->cp, 8, b->cn, fp);
 		fread(&size, 4, 1, fp);
+        fread(&csize, 4, 1, fp);
 		if (size == 0) continue;
+        if (csize == 0) continue;
 		b->h = h = kh_init(idx);
+        b->ch = ch = kh_init(idx);
 		kh_resize(idx, h, size);
+        kh_resize(idx, ch, csize);
 		for (j = 0; j < size; ++j) {
 			uint64_t x[2];
 			int absent;
@@ -671,6 +683,15 @@ mm_idx_t *mm_idx_load(FILE *fp)
 			assert(absent);
 			kh_val(h, k) = x[1];
 		}
+        for (j = 0; j < csize; ++j) {
+            uint64_t x[2];
+            int absent;
+            fread(x, 8, 2, fp);
+            // fprintf("%s Key to put: %s", __func__, x[0]);
+            k = kh_put(idx, ch, x[0], &absent);
+            assert(absent);
+            kh_val(ch, k) = x[1];
+        }
 	}
         if (!(mi->flag & MM_I_NO_SEQ)) {
 		mi->S = (uint32_t*)malloc((sum_len + 7) / 8 * 4);

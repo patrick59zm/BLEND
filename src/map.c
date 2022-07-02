@@ -62,7 +62,7 @@ static int mm_dust_minier(void *km, int n, mm128_t *a, int l_seq, const char *se
 }
 
 //mm128_v is a 128-bit array (2x 64-bit x,y). n length, m memory allocation.
-static void collect_minimizers(void *km, const mm_mapopt_t *opt, const mm_idx_t *mi, int n_segs, const int *qlens, const char **seqs, mm128_v *mv)
+static void collect_minimizers(void *km, const mm_mapopt_t *opt, const mm_idx_t *mi, int n_segs, const int *qlens, const char **seqs, mm128_v *mv, mm128_v *nmv)
 {
 	int i, n, sum = 0;
 	mv->n = 0;
@@ -71,7 +71,7 @@ static void collect_minimizers(void *km, const mm_mapopt_t *opt, const mm_idx_t 
 
 		/*mv->a[i].x = kMer<<14 | kmerSpan
  		mv->a[i].y = rid<<32 | lastPos<<1 | strand*/
-		mm_sketch(km, seqs[i], qlens[i], mi->w, mi->blend_bits, mi->k, mi->k_shift, mi->n_neighbors, i, mi->flag&MM_I_HPC, mi->flag&B_I_SKEWED, mi->flag&B_I_STROBEMERS, mv);
+		mm_sketch(km, seqs[i], qlens[i], mi->w, mi->blend_bits, mi->k, mi->k_shift, mi->n_neighbors, i, mi->flag&MM_I_HPC, mi->flag&B_I_SKEWED, mi->flag&B_I_STROBEMERS, mv, nmv);
 		for (j = n; j < mv->n; ++j){
 			//last position i value is updated as i+sum (sum of previous qlens)
 			mv->a[j].y += sum << 1;
@@ -297,7 +297,8 @@ void mm_map_frag(const mm_idx_t *mi, int n_segs, const int *qlens, const char **
 	uint64_t *u, *mini_pos;
 	mm128_t *a;
 	mm128_v mv = {0,0,0}; //128-bit vector to collect all seeds of a query sequence
-	mm_reg1_t *regs0;
+    mm128_v nmv = {0,0,0};
+    mm_reg1_t *regs0;
 	km_stat_t kmst;
 	float chn_pen_gap, chn_pen_skip;
 
@@ -312,7 +313,7 @@ void mm_map_frag(const mm_idx_t *mi, int n_segs, const int *qlens, const char **
 	hash  = __ac_Wang_hash(hash);
 
 	//mv is filled here where we have seeds from the query sequence
-	collect_minimizers(b->km, opt, mi, n_segs, qlens, seqs, &mv);
+	collect_minimizers(b->km, opt, mi, n_segs, qlens, seqs, &mv, &nmv);
 	if (opt->q_occ_frac > 0.0f) mm_seed_mz_flt(b->km, &mv, opt->mid_occ, opt->q_occ_frac);
 	if (opt->flag & MM_F_HEAP_SORT) a = collect_seed_hits_heap(b->km, opt, opt->mid_occ, mi, qname, &mv, qlen_sum, &n_a, &rep_len, &n_mini_pos, &mini_pos);
 	else a = collect_seed_hits(b->km, opt, opt->mid_occ, mi, qname, &mv, qlen_sum, &n_a, &rep_len, &n_mini_pos, &mini_pos);
